@@ -1,3 +1,4 @@
+use std::fmt::format;
 use heck::*;
 use std::io::{Read, Write};
 use std::mem;
@@ -157,12 +158,12 @@ fn render_record(src: &mut String, name: &str, nt: &NamedType, s: &RecordDatatyp
     }
     src.push_str(")");
 
-    src.push_str(&*format!("internal fun __load_{}(ptr: Int): {} {{\n", full_name, full_name));
+    src.push_str(&*format!("internal fun __load_{}(ptr: Pointer): {} {{\n", full_name, full_name));
     src.push_str("    return ");
     load_type(nt, "ptr", src);
     src.push_str("\n}\n");
 
-    src.push_str(&*format!("internal fun __store_{}(x: {}, ptr: Int) {{\n", full_name, full_name));
+    src.push_str(&*format!("internal fun __store_{}(x: {}, ptr: Pointer) {{\n", full_name, full_name));
     store_type(nt, "x", "ptr", src);
     src.push_str("\n}\n");
 }
@@ -461,9 +462,13 @@ impl Bindgen for Rust<'_> {
                 panic!("Instruction::AddrOf unsupported");
             }
             Instruction::I64FromBitflags { .. } | Instruction::I64FromU64 => top_as("Long"),
+
             Instruction::I32FromPointer
-            | Instruction::I32FromConstPointer
-            | Instruction::I32FromHandle { .. }
+            | Instruction::I32FromConstPointer => {
+                results.push(format!("{}.address.toInt()", operands.pop().unwrap()));
+            }
+
+            Instruction::I32FromHandle { .. }
             | Instruction::I32FromUsize
             | Instruction::I32FromChar
             | Instruction::I32FromU8
@@ -488,7 +493,7 @@ impl Bindgen for Rust<'_> {
             }
             Instruction::ListPointerLength => {
                 let list = operands.pop().unwrap();
-                results.push(format!("allocator.writeToLinearMemory({})", list));
+                results.push(format!("allocator.writeToLinearMemory({}).address.toInt()", list));
                 results.push(format!("{}.size", list));
             }
             Instruction::S8FromI32 => top_as("Byte"),
@@ -501,13 +506,15 @@ impl Bindgen for Rust<'_> {
             Instruction::U64FromI64 => {},
             Instruction::UsizeFromI32 => {},
             Instruction::HandleFromI32 { .. } => {},
-            Instruction::PointerFromI32 { .. } => {},
-            Instruction::ConstPointerFromI32 { .. } => {},
+            Instruction::PointerFromI32 { .. } |
+            Instruction::ConstPointerFromI32 { .. } => {
+                results.push(format!("Pointer({}.toUInt())", operands.pop().unwrap()));
+            },
             Instruction::BitflagsFromI32 { .. } => unimplemented!(),
             Instruction::BitflagsFromI64 { .. } => unimplemented!(),
 
             Instruction::ReturnPointerGet { n } => {
-                results.push(format!("rp{}", n));
+                results.push(format!("rp{}.address.toInt()", n));
             }
 
             Instruction::Load { ty } => {
@@ -517,7 +524,8 @@ impl Bindgen for Rust<'_> {
                     TypeRef::Name(_) => unimplemented!(),
                     TypeRef::Value(rvt) => {
                         let vt: &Type = rvt.as_ref();
-                        load_type(&ty, &operands[0], &mut s);
+                        let ptr = format!("Pointer({}.toUInt())", &operands[0]);
+                        load_type(&ty, &ptr, &mut s);
                     },
                 }
                 results.push(s);
@@ -608,7 +616,7 @@ fn load_int_repr(repr: IntRepr, ptr: &str, s: &mut String) {
         IntRepr::U64 => "loadLong"
     };
 
-    s.push_str(format!("{}({})", fun, ptr).as_str());
+    s.push_str(format!("({}).{}()", ptr, fun).as_str());
 }
 
 fn store_int_repr(repr: IntRepr, reference: &str, ptr: &str, s: &mut String) {
@@ -619,7 +627,7 @@ fn store_int_repr(repr: IntRepr, reference: &str, ptr: &str, s: &mut String) {
         IntRepr::U64 => "storeLong"
     };
 
-    s.push_str(format!("{}({}, {})", fun, ptr, reference).as_str());
+    s.push_str(format!("({}).{}({})", ptr, fun, reference).as_str());
 }
 
 fn to_kotlin_type(repr: IntRepr) -> &'static str {
@@ -663,11 +671,10 @@ fn load_value_type(vt: &Type, ptr: &str, s: &mut String) {
         Type::List(l) => {
             unimplemented!();
         }
-        Type::Pointer(_) => {
+        Type::Pointer(_) | Type::ConstPointer(_) => {
+            s.push_str("Pointer(");
             load_int_repr(IntRepr::U32, ptr, s);
-        }
-        Type::ConstPointer(cp) => {
-            load_int_repr(IntRepr::U32, ptr, s);
+            s.push_str(".toUInt())")
         }
         Type::Builtin(b) => {
             load_built_in(b, ptr, s);
@@ -683,8 +690,12 @@ fn store_value_type(vt: &Type, reference: &str, ptr: &str, s: &mut String) {
         Type::List(l) => {
             unimplemented!();
         }
-        Type::Handle(_) | Type::Pointer(_) | Type::ConstPointer(_) => {
+        Type::Handle(_) => {
             store_int_repr(IntRepr::U32, reference, ptr, s);
+        },
+        Type::Pointer(_) | Type::ConstPointer(_) => {
+            let reference_to_int = format!("{}.address.toInt()", reference);
+            store_int_repr(IntRepr::U32, reference_to_int.as_str(), ptr, s);
         }
         Type::Builtin(b) => {
             store_built_in(b, reference, ptr, s);
